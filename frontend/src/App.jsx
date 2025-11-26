@@ -1,263 +1,422 @@
 // frontend/src/App.jsx
-import { useEffect, useRef, useState } from "react";
-import { createChart } from "lightweight-charts";
-import { calculateVolumeProfile } from "./volumeProfile";
+import { useEffect, useMemo, useState } from "react";
+import ChartCanvas from "./ChartCanvas";
 
-export default function App() {
-  const chartContainerRef = useRef(null);
-  const profileBoxesRef = useRef([]);
-  const candlesRef = useRef([]);
+const API_BASE = "http://localhost:4000";
 
-  const [symbol, setSymbol] = useState("SBER");
-  const [interval, setInterval] = useState(1);
-  const [chartType, setChartType] = useState("candles"); // candles | bars | line
-  const [showProfile, setShowProfile] = useState(true);
-  const [profileMode, setProfileMode] = useState("full"); // UI, пока не влияет на расчёт
-
+function App() {
+  const [instruments, setInstruments] = useState([]);
+  const [selectedInstrument, setSelectedInstrument] = useState("");
+  const [interval, setInterval] = useState(10); // 10 минут по умолчанию
+  const [candles, setCandles] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [errorText, setErrorText] = useState("");
+  const [chartType, setChartType] = useState("candles");
 
-  useEffect(() => {
-    if (!chartContainerRef.current) return;
+  const [profileMode, setProfileMode] = useState("visible");
 
-    const clearProfileBoxes = () => {
-      profileBoxesRef.current.forEach((el) => el.remove());
-      profileBoxesRef.current = [];
-    };
+  // UI-настройки профиля
+  const [profileDensityPreset, setProfileDensityPreset] =
+    useState("medium"); // low | medium | high
+  const [valueAreaPercentStr, setValueAreaPercentStr] =
+    useState("0.7"); // "0.6" | "0.7" | "0.8"
 
-    clearProfileBoxes();
+  // ---- Профиль: вычисляем реальные настройки через useMemo ----
+  const profileSettings = useMemo(() => {
+    let targetBins;
+    let minBins;
+    let maxBins;
 
-    const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: 600,
-      layout: { background: { color: "#ffffff" }, textColor: "#000000" },
-      grid: {
-        vertLines: { color: "#e0e0e0" },
-        horzLines: { color: "#e0e0e0" },
-      },
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: true,
-      },
-    });
-
-    let priceSeries;
-    if (chartType === "candles") {
-      priceSeries = chart.addCandlestickSeries();
-    } else if (chartType === "bars") {
-      priceSeries = chart.addBarSeries();
+    if (profileDensityPreset === "low") {
+      targetBins = 25;
+      minBins = 10;
+      maxBins = 120;
+    } else if (profileDensityPreset === "high") {
+      targetBins = 80;
+      minBins = 40;
+      maxBins = 300;
     } else {
-      priceSeries = chart.addLineSeries({ lineWidth: 2 });
+      // medium
+      targetBins = 40;
+      minBins = 20;
+      maxBins = 200;
     }
 
-    const volumeSeries = chart.addHistogramSeries({
-      priceScaleId: "volume",
-      priceFormat: { type: "volume" },
-      scaleMargins: { top: 0.8, bottom: 0 },
-    });
-    chart.priceScale("volume").applyOptions({
-      scaleMargins: { top: 0.8, bottom: 0 },
-    });
+    const va = parseFloat(valueAreaPercentStr);
+    const valueAreaPercent =
+      !isNaN(va) && va > 0 && va < 1 ? va : 0.7;
 
-    const drawVolumeProfile = () => {
-      clearProfileBoxes();
-
-      if (!showProfile) return;
-      if (!chartContainerRef.current) return;
-
-      const allCandles = candlesRef.current;
-      if (!allCandles || allCandles.length === 0) return;
-
-      // пока ВСЕГДА строим профиль по всему диапазону свечей
-      const sourceCandles = allCandles;
-
-      const profile = calculateVolumeProfile(sourceCandles, 24);
-      if (!profile || profile.length === 0) return;
-
-      const maxVolume = Math.max(...profile.map((b) => b.volume)) || 1;
-
-      const container = chartContainerRef.current;
-      const containerHeight = container.clientHeight;
-      const binCount = profile.length;
-      const binHeight = containerHeight / binCount;
-      const maxWidth = 120;
-
-      profile.forEach((bin, index) => {
-        if (bin.volume <= 0) return;
-
-        const ratio = bin.volume / maxVolume;
-        const widthPx = Math.max(4, ratio * maxWidth);
-        const top = index * binHeight;
-        const height = Math.max(2, binHeight - 1);
-
-        const box = document.createElement("div");
-        box.style.position = "absolute";
-        box.style.right = "50px";
-        box.style.top = `${top}px`;
-        box.style.width = `${widthPx}px`;
-        box.style.height = `${height}px`;
-        box.style.background =
-          bin.volume === maxVolume
-            ? "rgba(0, 128, 255, 0.9)" // POC
-            : "rgba(100, 149, 237, 0.55)";
-        box.style.pointerEvents = "none";
-
-        container.appendChild(box);
-        profileBoxesRef.current.push(box);
-      });
+    return {
+      targetBins,
+      minBins,
+      maxBins,
+      valueAreaPercent,
     };
+  }, [profileDensityPreset, valueAreaPercentStr]);
 
-    const fetchData = async () => {
+  // ---- Загружаем список инструментов один раз ----
+  useEffect(() => {
+    async function loadInstruments() {
+      try {
+        const res = await fetch(`${API_BASE}/api/instruments`);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        setInstruments(data);
+      } catch (err) {
+        console.error("Ошибка загрузки инструментов:", err);
+      }
+    }
+
+    loadInstruments();
+  }, []);
+
+  // ---- Выбираем первый инструмент после загрузки ----
+  useEffect(() => {
+    if (!selectedInstrument && instruments.length > 0) {
+      setSelectedInstrument(instruments[0].symbol);
+    }
+  }, [instruments, selectedInstrument]);
+
+  // ---- Загружаем свечи при смене инструмента/таймфрейма ----
+  useEffect(() => {
+    if (!selectedInstrument) return;
+
+    async function loadCandles() {
       try {
         setLoading(true);
-        setErrorText("");
 
-        const url = `http://localhost:4000/api/candles?symbol=${symbol}&interval=${interval}&limit=600`;
-        console.log("Запрашиваем:", url, "chartType:", chartType);
-
+        const url = `${API_BASE}/api/candles?symbol=${encodeURIComponent(
+          selectedInstrument
+        )}&interval=${interval}`;
         const res = await fetch(url);
-        const data = await res.json();
 
-        if (!data.candles || !Array.isArray(data.candles)) {
-          setErrorText("Ошибка: сервер не вернул свечи");
-          return;
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
         }
 
-        const candles = data.candles.map((c) => ({
-          time: Math.floor(new Date(c.datetime).getTime() / 1000),
-          open: Number(c.open),
-          high: Number(c.high),
-          low: Number(c.low),
-          close: Number(c.close),
-          volume: Number(c.volume),
-        }));
+        const raw = await res.json();
 
-        candlesRef.current = candles;
-
-        if (chartType === "line") {
-          priceSeries.setData(
-            candles.map((c) => ({ time: c.time, value: c.close }))
-          );
+        // Нормализуем формат ответа
+        let data;
+        if (Array.isArray(raw)) {
+          data = raw;
+        } else if (Array.isArray(raw.candles)) {
+          data = raw.candles;
+        } else if (Array.isArray(raw.rows)) {
+          data = raw.rows;
         } else {
-          priceSeries.setData(
-            candles.map((c) => ({
-              time: c.time,
-              open: c.open,
-              high: c.high,
-              low: c.low,
-              close: c.close,
-            }))
+          console.error(
+            "Неожиданный формат ответа /api/candles:",
+            raw
+          );
+          data = [];
+        }
+
+        const normalized = data
+          .map((c) => {
+            const t = new Date(c.time);
+            const timeMs = t.getTime();
+            if (!isFinite(timeMs)) {
+              // если время битое — выкидываем свечу
+              return null;
+            }
+
+            const open = Number(c.open);
+            const high = Number(c.high);
+            const low = Number(c.low);
+            const close = Number(c.close);
+            const volume = Number(c.volume);
+
+            if (
+              !isFinite(open) ||
+              !isFinite(high) ||
+              !isFinite(low) ||
+              !isFinite(close) ||
+              !isFinite(volume)
+            ) {
+              return null;
+            }
+
+            return {
+              time: t,
+              open,
+              high,
+              low,
+              close,
+              volume,
+            };
+          })
+          .filter(Boolean); // убираем null
+
+        if (normalized.length === 0) {
+          console.warn(
+            "После нормализации нет валидных свечей",
+            { symbol: selectedInstrument, interval, rawCount: data.length }
           );
         }
 
-        volumeSeries.setData(
-          candles.map((c) => ({
-            time: c.time,
-            value: c.volume,
-            color: c.close >= c.open ? "#4caf50" : "#e53935",
-          }))
-        );
-
-        chart.timeScale().fitContent();
-        drawVolumeProfile();
+        setCandles(normalized);
       } catch (err) {
-        console.error("Ошибка загрузки данных:", err);
-        setErrorText("Ошибка загрузки данных (подробности в консоли)");
+        console.error("Ошибка загрузки свечей:", err);
+        setCandles([]);
       } finally {
         setLoading(false);
       }
-    };
+    }
 
-    fetchData();
-
-    const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-        });
-        drawVolumeProfile();
-      }
-    };
-
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      window.removeEventListener("resize", handleResize);
-      clearProfileBoxes();
-      chart.remove();
-    };
-  }, [symbol, interval, chartType, showProfile, profileMode]);
+    loadCandles();
+  }, [selectedInstrument, interval]);
 
   return (
-    <div style={{ padding: "10px", fontFamily: "sans-serif" }}>
-      <h2>MOEX TradingView Clone</h2>
-
-      <div style={{ marginBottom: "10px" }}>
-        <label>Инструмент:&nbsp;</label>
-        <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
-          <option value="SBER">SBER</option>
-          <option value="GAZP">GAZP</option>
-          <option value="VTBR">VTBR</option>
-          <option value="YNDX">YNDX</option>
-        </select>
-
-        <label style={{ marginLeft: "10px" }}>Таймфрейм:&nbsp;</label>
-        <select
-          value={interval}
-          onChange={(e) => setInterval(Number(e.target.value))}
-        >
-          <option value={1}>1m</option>
-          <option value={10}>10m</option>
-          <option value={60}>1h</option>
-          <option value={24}>1d</option>
-        </select>
-
-        <label style={{ marginLeft: "10px" }}>Тип графика:&nbsp;</label>
-        <select
-          value={chartType}
-          onChange={(e) => setChartType(e.target.value)}
-        >
-          <option value="candles">Свечи</option>
-          <option value="bars">Бары</option>
-          <option value="line">Линия</option>
-        </select>
-
-        <label style={{ marginLeft: "10px" }}>
-          <input
-            type="checkbox"
-            checked={showProfile}
-            onChange={(e) => setShowProfile(e.target.checked)}
-          />{" "}
-          Профиль объёма
-        </label>
-
-        <label style={{ marginLeft: "10px" }}>Режим профиля:&nbsp;</label>
-        <select
-          value={profileMode}
-          onChange={(e) => setProfileMode(e.target.value)}
-        >
-          <option value="full">Весь диапазон (пока)</option>
-          <option value="visible">Видимый диапазон (будет позже)</option>
-        </select>
-
-        {loading && (
-          <span style={{ marginLeft: "10px" }}>Загрузка...</span>
-        )}
-      </div>
-
-      {errorText && (
-        <div style={{ color: "red", marginBottom: "10px" }}>{errorText}</div>
-      )}
-
-      <div
-        ref={chartContainerRef}
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        backgroundColor: "#020617",
+        color: "#e5e7eb",
+      }}
+    >
+      {/* Верхняя панель управления */}
+      <header
         style={{
-          width: "100%",
-          height: "600px",
-          border: "1px solid #ccc",
-          position: "relative",
+          padding: "8px 12px",
+          borderBottom: "1px solid #111827",
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "12px",
+          alignItems: "center",
+          backgroundColor: "#020617",
         }}
-      />
+      >
+        {/* Инструмент */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ fontSize: 12, color: "#9ca3af" }}>
+            Инструмент
+          </label>
+          <select
+            value={selectedInstrument}
+            onChange={(e) => setSelectedInstrument(e.target.value)}
+            style={{
+              padding: "4px 8px",
+              backgroundColor: "#020617",
+              color: "#e5e7eb",
+              border: "1px solid #4b5563",
+              borderRadius: 4,
+              minWidth: 140,
+            }}
+          >
+            {instruments.map((inst) => (
+              <option key={inst.symbol} value={inst.symbol}>
+                {inst.symbol}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Таймфрейм */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ fontSize: 12, color: "#9ca3af" }}>
+            Таймфрейм
+          </label>
+          <select
+            value={interval}
+            onChange={(e) => setInterval(Number(e.target.value))}
+            style={{
+              padding: "4px 8px",
+              backgroundColor: "#020617",
+              color: "#e5e7eb",
+              border: "1px solid #4b5563",
+              borderRadius: 4,
+              minWidth: 110,
+            }}
+          >
+            <option value={1}>1 мин</option>
+            <option value={10}>10 мин</option>
+            <option value={60}>1 час</option>
+            <option value={1440}>1 день</option>
+          </select>
+        </div>
+
+        {/* Тип графика */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ fontSize: 12, color: "#9ca3af" }}>
+            Тип графика
+          </label>
+          <select
+            value={chartType}
+            onChange={(e) => setChartType(e.target.value)}
+            style={{
+              padding: "4px 8px",
+              backgroundColor: "#020617",
+              color: "#e5e7eb",
+              border: "1px solid #4b5563",
+              borderRadius: 4,
+              minWidth: 120,
+            }}
+          >
+            <option value="candles">Свечи</option>
+            <option value="bars">Бары</option>
+            <option value="line">Линия (close)</option>
+          </select>
+        </div>
+
+        {/* Режим профиля */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ fontSize: 12, color: "#9ca3af" }}>
+            Профиль объёма
+          </label>
+          <select
+            value={profileMode}
+            onChange={(e) => setProfileMode(e.target.value)}
+            style={{
+              padding: "4px 8px",
+              backgroundColor: "#020617",
+              color: "#e5e7eb",
+              border: "1px solid #4b5563",
+              borderRadius: 4,
+              minWidth: 210,
+            }}
+          >
+            <option value="visible">По видимому диапазону</option>
+            <option value="all">По всей истории</option>
+            <option value="lastN">По последним N свечам (N=100)</option>
+            <option value="selection">
+              По выделенному диапазону (ПКМ)
+            </option>
+          </select>
+        </div>
+
+        {/* Настройки профиля справа */}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+            padding: "4px 8px",
+            borderRadius: 6,
+            border: "1px solid #1f2937",
+            marginLeft: "auto",
+            backgroundColor: "#020617",
+          }}
+        >
+          <span
+            style={{
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              color: "#9ca3af",
+            }}
+          >
+            Настройки профиля
+          </span>
+
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              alignItems: "center",
+            }}
+          >
+            {/* Плотность профиля */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                minWidth: 150,
+              }}
+            >
+              <label style={{ fontSize: 11, color: "#9ca3af" }}>
+                Плотность профиля
+              </label>
+              <select
+                value={profileDensityPreset}
+                onChange={(e) =>
+                  setProfileDensityPreset(e.target.value)
+                }
+                style={{
+                  padding: "4px 8px",
+                  backgroundColor: "#020617",
+                  color: "#e5e7eb",
+                  border: "1px solid #4b5563",
+                  borderRadius: 4,
+                }}
+              >
+                <option value="low">Низкая (толстые уровни)</option>
+                <option value="medium">Средняя</option>
+                <option value="high">Высокая (тонкие уровни)</option>
+              </select>
+            </div>
+
+            {/* Value Area */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                minWidth: 130,
+              }}
+            >
+              <label style={{ fontSize: 11, color: "#9ca3af" }}>
+                Value Area
+              </label>
+              <select
+                value={valueAreaPercentStr}
+                onChange={(e) =>
+                  setValueAreaPercentStr(e.target.value)
+                }
+                style={{
+                  padding: "4px 8px",
+                  backgroundColor: "#020617",
+                  color: "#e5e7eb",
+                  border: "1px solid #4b5563",
+                  borderRadius: 4,
+                }}
+              >
+                <option value="0.6">60%</option>
+                <option value="0.7">70%</option>
+                <option value="0.8">80%</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Область графика */}
+      <main style={{ flex: 1, minHeight: 0 }}>
+        {loading && (
+          <div
+            style={{
+              position: "absolute",
+              top: 8,
+              left: 12,
+              padding: "4px 8px",
+              backgroundColor: "rgba(15,23,42,0.9)",
+              borderRadius: 4,
+              fontSize: 12,
+              border: "1px solid #4b5563",
+              zIndex: 10,
+            }}
+          >
+            Загрузка данных...
+          </div>
+        )}
+        <div style={{ width: "100%", height: "100%" }}>
+          <ChartCanvas
+            candles={candles}
+            chartType={chartType}
+            interval={interval}
+            profileMode={profileMode}
+            profileSettings={profileSettings}
+          />
+        </div>
+      </main>
     </div>
   );
 }
+
+export default App;
